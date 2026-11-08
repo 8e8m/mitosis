@@ -44,8 +44,10 @@ else
     DATADIR="${DATADIR:-$TARGET/share/mitosis/celmag}"
 fi
 
+echo
 echo "Installing  To: $TARGET/bin"
 echo "Data Directory: $DATADIR"
+echo
 
 if [ "${COPY:-0}" != 1 ] && [ -d "$DATADIR" ] && [ ! -L "$DATADIR" ]; then
     die "$DATADIR is a real directory, not touching it." \
@@ -76,3 +78,13 @@ else
         echo "note: $DATADIR is not on mitosis's default search path;" \
              "export MITOSIS_EVAL_PATH=\"$DATADIR\" (colon-separated, first wins)."
 fi
+
+cat <<EOF
+
+Consider adding a global .gitignore to your git:
+
+git config --global core.excludesfile $HOME/.gitignore
+echo ".mitosis" >> $HOME/.gitignore
+
+Also, make sure to add this to project .gitignore, for non-psychos.
+EOF
