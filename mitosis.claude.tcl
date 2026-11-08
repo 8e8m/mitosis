@@ -8,7 +8,7 @@
 #
 # mitosis -- prototype.  tclsh 8.6+, coreutils sha256sum.
 #
-#   mitosis [-C dir] [-j N] [-B] [-n] [-v] [clean]
+#   mitosis [-C dir] [-j N] [-B] [-n] [-v] [--eval-path] [VAR=value ...] [clean | TARGET...]
 #
 # Model: one primitive, the edge.  Files are globbed from source rows of the
 # "at" table; the file DAG is (files x edges), computed.  Transformations
@@ -39,6 +39,27 @@
 #                        GLOBS are `string match` patterns on the source path, e.g. source/test/*
 #                        Per-target flags only reach the final (link) command; compile flags are shared.
 #   default-target NAME  same as `target NAME` (every object)
+#   finalize SCRIPT      run SCRIPT after build.celmag and before planning, so a system-layer
+#                        file can branch on the project's final variables and chosen digests
+#
+# Variables from outside: VAR=value in the environment works for any variable declared with
+# set-default.  On the command line, `mitosis CFLAGS=-O0 DEBUG=1` sets VAR for this run and
+# beats build.celmag and finalize scripts (like make); `VAR+=value` appends after them.
+# This file carries no build policy.  Digests, toolchain defaults and flag layers all live in
+# "celmag directories" found along the eval path, and without them mitosis does nothing.
+#
+#   eval path   MITOSIS_EVAL_PATH (colon-separated, first wins) if set, else the XDG locations:
+#                 $XDG_CONFIG_HOME/mitosis           (~/.config/mitosis)
+#                 $XDG_DATA_HOME/mitosis/celmag      (~/.local/share/mitosis/celmag)
+#                 /etc/celmag
+#                 each $XDG_DATA_DIRS entry + /mitosis/celmag   (/usr/local/share:/usr/share)
+#               Only existing directories count; `mitosis --eval-path` prints what was found.
+#   celmag dir  *.tcl at its top are layers, loaded in name order across the whole path;
+#               a name found in an earlier directory shadows the same name in later ones (an empty
+#               file disables a layer).  digest/NAME.tcl are digests, first one found wins.
+#
+# Layers, in order: layers from the eval path, build.celmag, finalize scripts, command line.
+# (set-default is first-wins, so earlier layers win over later ones.)
 #
 # A build.celmag is REQUIRED; it is searched for upwards from the current directory and
 # mitosis runs from the directory that holds it.  mitosis [clean | TARGET...] builds only
@@ -57,9 +78,11 @@ namespace eval mitosis {
     variable order   {}   ;# ordering-only edges {from to}
     variable depexts {}
     variable used    {}
+    variable finals  {}   ;# finalize scripts
+    variable assigns {}   ;# command-line VAR=value / VAR+=value: name op words
     variable targets {}   ;# name -> options (-only -not -with -add -role)
     variable tjobs   {}   ;# target name -> job id
-    variable digests {}
+    variable evalpath {}
     variable known   {}
     variable outdirs {}
     variable srcdirs {}
@@ -79,7 +102,6 @@ namespace eval mitosis {
     variable db      {}
     variable hmemo   {}
     variable tmemo   {}
-    variable etc     [expr {[info exists ::env(MITOSIS_ETC)] ? $::env(MITOSIS_ETC) : "/etc/celmag"}]
     array set J {}
 }
 
@@ -111,15 +133,12 @@ proc depfile {ext} {
 
 proc use {name} {
     if {$name in $::mitosis::used} return
-    lappend ::mitosis::used $name
-    set f [file join $::mitosis::etc digest $name.celmag]
-    if {[file readable $f]} {
-        uplevel #0 [list source $f]
-    } elseif {[dict exists $::mitosis::digests $name]} {
-        uplevel #0 [dict get $::mitosis::digests $name]
-    } else {
-        error "mitosis: no digest named '$name' (available: [join [mitosis::digest-names] {, }])"
+    set f [mitosis::find-digest $name]
+    if {$f eq ""} {
+        error "mitosis: no digest named '$name'\n  available: [join [mitosis::digest-names] {, }]\n  searched:  [join $::mitosis::evalpath {, }]"
     }
+    lappend ::mitosis::used $name
+    uplevel #0 [list source $f]
 }
 
 proc set-default {name value} {
@@ -148,6 +167,8 @@ proc target {name args} {
 
 proc default-target {{name {}}} {if {$name ne ""} {target $name}}
 
+proc finalize {script} {lappend ::mitosis::finals $script}
+
 # small helpers for config files
 proc have {x} {expr {[lindex [auto_execok $x] 0] ne ""}}
 proc basename {p} {file tail $p}
@@ -155,62 +176,82 @@ proc nproc {} {
     if {[catch {exec nproc} n] || ![string is integer -strict $n]} {return 1}
     return $n
 }
-proc pick-cc {preferGcc} {
-    foreach c [expr {$preferGcc ? {gcc clang} : {clang gcc}}] {if {[have $c]} {return $c}}
-    return cc
-}
-proc cxx-of {cc} {
-    switch -- $cc {clang {return clang++} gcc {return g++} default {return c++}}
-}
 proc var {name {default {}}} {
     if {[info exists ::$name]} {return [set ::$name]}
     return $default
 }
 
-# ------------------------------------------------- builtin config / digest
-
-# I like this part, it's pretty simple, but I'm not sure if it's flexible for multihead builds obviously
-# and of course the syntax here is a bit unclear, compared to something more
-
-set mitosis::builtin {
-    set-default PREFER_GCC  0
-    set-default PREFER_MOLD 1
-    set-default VERBOSE     0
-    set-default jobs        [nproc]
-    set-default CC          [pick-cc $PREFER_GCC]
-    set-default CPP         [cxx-of $CC]
-    set-default CFLAGS      {-std=c23 -O2}   ;# -pthread
-    set-default CXXFLAGS    {-std=c++20 -O2}
-    set-default CPPFLAGS    {}
-    set-default LDFLAGS     {} ;# -lc -lm -lchad
-    if {$PREFER_MOLD && [have mold]} {set-add LDFLAGS -fuse-ld=mold}
-}
-
-dict set mitosis::digests c {
-    at source {.c .cpp .gperf .h}
-    at object {.gperf.h .d .o}
-    at .      {target}
-
-    alias .cpp {.c++ .C}
-    depfile .d
-
-    relate .gperf   .h      {gperf $.gperf --output-file $.h}
-    relate .gperf.h .c
-    relate .gperf.h .cpp
-    relate .c   {.o .d}     {$CC  -MMD -MF $.d $incdirs $CFLAGS   $CPPFLAGS -c $.c   -o $.o}
-    relate .cpp {.o .d}     {$CPP -MMD -MF $.d $incdirs $CXXFLAGS $CPPFLAGS -c $.cpp -o $.o}
-    relate .o   target      {$LD -o $target $.o $LDFLAGS}
-}
-
 # ------------------------------------------------------------ types / paths
 
+# ---------------------------------------------------------------- eval path
+
+proc mitosis::xdg {name default} {
+    if {[info exists ::env($name)] && [string index $::env($name) 0] eq "/"} {return $::env($name)}
+    return $default
+}
+
+# directories to search, most specific first; only existing ones are kept
+proc mitosis::eval-path {} {
+    set raw {}
+    if {[info exists ::env(MITOSIS_EVAL_PATH)]} {
+        set raw [split $::env(MITOSIS_EVAL_PATH) :]
+    } else {
+        set cfg {}; set data {}
+        if {[info exists ::env(HOME)] && $::env(HOME) ne ""} {
+            set cfg  $::env(HOME)/.config
+            set data $::env(HOME)/.local/share
+        }
+        set cfg  [xdg XDG_CONFIG_HOME $cfg]
+        set data [xdg XDG_DATA_HOME $data]
+        if {$cfg  ne ""} {lappend raw [file join $cfg mitosis]}
+        if {$data ne ""} {lappend raw [file join $data mitosis celmag]}
+        lappend raw /etc/celmag
+        foreach d [split [xdg XDG_DATA_DIRS /usr/local/share:/usr/share] :] {
+            if {[string index $d 0] eq "/"} {lappend raw [file join $d mitosis celmag]}
+        }
+    }
+    set out {}
+    foreach d $raw {
+        if {$d eq ""} continue
+        set d [file normalize $d]
+        if {[file isdirectory $d] && $d ni $out} {lappend out $d}
+    }
+    return $out
+}
+
+proc mitosis::find-digest {name} {
+    variable evalpath
+    foreach d $evalpath {
+        set f [file join $d digest $name.tcl]
+        if {[file isfile $f] && [file readable $f]} {return $f}
+    }
+    return {}
+}
+
 proc mitosis::digest-names {} {
-    variable digests; variable etc
-    set r [dict keys $digests]
-    foreach f [glob -nocomplain -directory [file join $etc digest] *.celmag] {
-        lappend r [file rootname [file tail $f]]
+    variable evalpath
+    set r {}
+    foreach d $evalpath {
+        foreach f [glob -nocomplain -directory [file join $d digest] *.tcl] {
+            lappend r [file rootname [file tail $f]]
+        }
     }
     return [lsort -unique $r]
+}
+
+# top-level *.tcl across the path, shadowed by name, in name order
+proc mitosis::layer-files {} {
+    variable evalpath
+    set seen {}; set items {}
+    foreach d $evalpath {
+        foreach f [glob -nocomplain -directory $d -types {f l} *.tcl] {
+            set t [file tail $f]
+            if {[dict exists $seen $t]} continue
+            dict set seen $t 1
+            lappend items [list $t $f]
+        }
+    }
+    return [lmap i [lsort -index 0 $items] {lindex $i 1}]
 }
 
 proc mitosis::cmplen {a b} {expr {[string length $b] - [string length $a]}}
@@ -730,7 +771,7 @@ proc mitosis::clean {} {
 # ---------------------------------------------------------------------- main
 
 proc mitosis::usage {} {
-    puts stderr "usage: mitosis \[-C dir\] \[-j N\] \[-B\] \[-n\] \[-v\] \[clean | TARGET...\]"
+    puts stderr "usage: mitosis \[-C dir\] \[-j N\] \[-B\] \[-n\] \[-v\] \[--eval-path\] \[VAR=value ...\] \[clean | TARGET...\]"
 }
 
 proc mitosis::find-root {} {
@@ -744,7 +785,8 @@ proc mitosis::find-root {} {
 }
 
 proc mitosis::main {argv} {
-    variable force; variable dry; variable etc; variable builtin
+    variable force; variable dry; variable evalpath
+    variable assigns; variable finals
     set cmd build; set dir {}; set jopt {}; set names {}
     while {[llength $argv]} {
         set a [lindex $argv 0]; set argv [lrange $argv 1 end]
@@ -757,26 +799,41 @@ proc mitosis::main {argv} {
             {^-j$}          {set jopt [lindex $argv 0]; set argv [lrange $argv 1 end]}
             {^-j[0-9]+$}    {set jopt [string range $a 2 end]}
             {^clean$}       {set cmd clean}
+            {^--eval-path$} {set cmd evalpath}
+            {^[A-Za-z_][A-Za-z0-9_]*\+?=} {
+                regexp {^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$} $a -> k plus v
+                lappend assigns $k [expr {$plus eq "+" ? "+=" : "="}] [regexp -all -inline {\S+} $v]
+            }
             {^-}            {puts stderr "mitosis: unknown option '$a'"; usage; return 2}
             default         {lappend names $a}
         }
     }
+    set evalpath [eval-path]      ;# before any cd: relative entries mean relative to here
+    if {$cmd eq "evalpath"} {puts [join $evalpath \n]; return 0}
     if {$dir ne ""} {cd $dir}
     set root [find-root]
     if {$root eq ""} {error "mitosis: no build.celmag in [pwd] or any parent directory"}
     cd $root
     set ::PWD [pwd]
-
-    # system layer: /etc/celmag/*.celmag, else the builtin defaults
-    set files [lsort [glob -nocomplain -directory $etc *.celmag]]
-    if {[llength $files]} {
-        foreach f $files {uplevel #0 [list source $f]}
-    } else {
-        uplevel #0 $builtin
+    if {![llength $evalpath]} {
+        error "mitosis: no eval-path directory exists, so there are no digests to work with.\n  Install them (install.sh) or point MITOSIS_EVAL_PATH at celmag directories (colon-separated)."
     }
+
+    # command-line VAR=value first, so set-default skips them and derived defaults follow them
+    foreach {k op v} $assigns {if {$op eq "="} {set ::$k $v}}
+
+    # layers from the eval path (set-default is first-wins), then the project's build.celmag
+    foreach f [layer-files] {uplevel #0 [list source $f]}
     uplevel #0 [list source [file join $root build.celmag]]
     if {![llength $mitosis::used]} {
         error "mitosis: build.celmag must select a digest with 'use NAME' (available: [join [digest-names] {, }])"
+    }
+    foreach script $finals {uplevel #0 $script}
+    if {![info exists ::jobs]} {set ::jobs [nproc]}
+
+    # the command line beats everything, as with make
+    foreach {k op v} $assigns {
+        if {$op eq "="} {set ::$k $v} else {lappend ::$k {*}$v}
     }
     if {![dict size $mitosis::targets]} {target [file tail [pwd]].out}
     if {$jopt ne ""} {set ::jobs $jopt}
