@@ -1,6 +1,7 @@
 #!/bin/sh
 # Installs mitosis: the program (bin/mitosis) and its celmag directory (digests + layers).
 #
+#   Root is supported for normal using non-package managed paths.
 #   ./install.sh                       user install: ~/.local/bin, data in $XDG_DATA_HOME/mitosis/celmag
 #   TARGET=/usr/local ./install.sh     bin in /usr/local/bin, data in /usr/local/share/mitosis/celmag
 #   TARGET=/usr DATADIR=/etc/celmag ./install.sh
@@ -29,10 +30,16 @@ if [ "$DONTCARE" = 0 ]; then
     echo "Found TCL $TCLv, we expect 8.6 however later versions probably work."
 fi
 
-# no TARGET means a user install, with data where mitosis looks first by default (XDG)
+# no TARGET means a user install, with data where mitosis looks first by default (XDG);
+# as root (uid 0) it means a system install instead: TARGET=/usr/local, DATADIR=/etc/celmag.
 if [ -z "${TARGET:-}" ]; then
-    TARGET="$HOME/.local"
-    DATADIR="${DATADIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mitosis/celmag}"
+    if [ "$(id -u)" -eq 0 ]; then
+        TARGET="/usr/local"
+        DATADIR="${DATADIR:-/etc/celmag}"
+    else
+        TARGET="$HOME/.local"
+        DATADIR="${DATADIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mitosis/celmag}"
+    fi
 else
     DATADIR="${DATADIR:-$TARGET/share/mitosis/celmag}"
 fi
