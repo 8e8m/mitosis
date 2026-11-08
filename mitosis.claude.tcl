@@ -1,6 +1,9 @@
 #!/usr/bin/env tclsh
 #
 # Highly directed build system theorized by me and actually manifest by claude.
+#
+# Fits in anywhere where Skel would, with flag transmutation from GNUmakefile to build.celmag
+#
 # Relates mitosis.2 and could be improved / simplified.
 #
 # mitosis -- prototype.  tclsh 8.6+, coreutils sha256sum.
@@ -24,9 +27,22 @@
 #                        contents are recorded as extra inputs of the job
 #                        (exists solely for .d)
 #   use NAME             load a digest (named edge set, that generally processes a group of commands)
+#                        REQUIRED: build.celmag must select at least one digest, there is no default
 #   set-default V X      set V unless already set (env var V wins if uppercase)
 #   set-add V items...   append to list variable V
-#   default-target NAME  name of the final file
+#   target NAME ?opts?   a final file built from a subset of the shared objects (all of them by default)
+#                          -only GLOBS   keep only objects whose originating source matches one of these
+#                          -not  GLOBS   drop objects whose originating source matches one of these
+#                          -with {V X..} replace variables for this target's final command
+#                          -add  {V X..} append to variables for this target's final command
+#                          -role ROLE    which final-edge role it fills (default: target)
+#                        GLOBS are `string match` patterns on the source path, e.g. source/test/*
+#                        Per-target flags only reach the final (link) command; compile flags are shared.
+#   default-target NAME  same as `target NAME` (every object)
+#
+# A build.celmag is REQUIRED; it is searched for upwards from the current directory and
+# mitosis runs from the directory that holds it.  mitosis [clean | TARGET...] builds only
+# the named targets (and what they need).
 #
 # CMD is a template, split into words at definition time.  $.ext is the
 # input/output file of that type (a list for a fold), $var splices a list
@@ -41,6 +57,8 @@ namespace eval mitosis {
     variable order   {}   ;# ordering-only edges {from to}
     variable depexts {}
     variable used    {}
+    variable targets {}   ;# name -> options (-only -not -with -add -role)
+    variable tjobs   {}   ;# target name -> job id
     variable digests {}
     variable known   {}
     variable outdirs {}
@@ -100,7 +118,7 @@ proc use {name} {
     } elseif {[dict exists $::mitosis::digests $name]} {
         uplevel #0 [dict get $::mitosis::digests $name]
     } else {
-        error "mitosis: no digest named '$name'"
+        error "mitosis: no digest named '$name' (available: [join [mitosis::digest-names] {, }])"
     }
 }
 
@@ -118,7 +136,17 @@ proc set-add {name args} {
     lappend ::$name {*}$args
 }
 
-proc default-target {{name {}}} {if {$name ne ""} {set ::target $name}}
+proc target {name args} {
+    array set o {-only {} -not {} -with {} -add {} -role target}
+    foreach {k v} $args {
+        if {![info exists o($k)]} {error "mitosis: target: unknown option '$k' (-only -not -with -add -role)"}
+        set o($k) $v
+    }
+    if {[dict exists $::mitosis::targets $name]} {error "mitosis: target '$name' declared twice"}
+    dict set ::mitosis::targets $name [array get o]
+}
+
+proc default-target {{name {}}} {if {$name ne ""} {target $name}}
 
 # small helpers for config files
 proc have {x} {expr {[lindex [auto_execok $x] 0] ne ""}}
@@ -141,6 +169,9 @@ proc var {name {default {}}} {
 
 # ------------------------------------------------- builtin config / digest
 
+# I like this part, it's pretty simple, but I'm not sure if it's flexible for multihead builds obviously
+# and of course the syntax here is a bit unclear, compared to something more
+
 set mitosis::builtin {
     set-default PREFER_GCC  0
     set-default PREFER_MOLD 1
@@ -148,12 +179,11 @@ set mitosis::builtin {
     set-default jobs        [nproc]
     set-default CC          [pick-cc $PREFER_GCC]
     set-default CPP         [cxx-of $CC]
-    set-default CFLAGS      {-std=c23 -O2}
-    set-default CXXFLAGS    {-std=c++20 -O2 -pthread}
+    set-default CFLAGS      {-std=c23 -O2}   ;# -pthread
+    set-default CXXFLAGS    {-std=c++20 -O2}
     set-default CPPFLAGS    {}
-    set-default LDFLAGS     {-lm}
+    set-default LDFLAGS     {} ;# -lc -lm -lchad
     if {$PREFER_MOLD && [have mold]} {set-add LDFLAGS -fuse-ld=mold}
-    use c
 }
 
 dict set mitosis::digests c {
@@ -169,10 +199,19 @@ dict set mitosis::digests c {
     relate .gperf.h .cpp
     relate .c   {.o .d}     {$CC  -MMD -MF $.d $incdirs $CFLAGS   $CPPFLAGS -c $.c   -o $.o}
     relate .cpp {.o .d}     {$CPP -MMD -MF $.d $incdirs $CXXFLAGS $CPPFLAGS -c $.cpp -o $.o}
-    relate .o   target      {$ld -o $target $.o $LDFLAGS}
+    relate .o   target      {$LD -o $target $.o $LDFLAGS}
 }
 
 # ------------------------------------------------------------ types / paths
+
+proc mitosis::digest-names {} {
+    variable digests; variable etc
+    set r [dict keys $digests]
+    foreach f [glob -nocomplain -directory [file join $etc digest] *.celmag] {
+        lappend r [file rootname [file tail $f]]
+    }
+    return [lsort -unique $r]
+}
 
 proc mitosis::cmplen {a b} {expr {[string length $b] - [string length $a]}}
 
@@ -268,9 +307,9 @@ proc mitosis::expand {tmpl ph locals} {
 
 # ------------------------------------------------------------------ planning
 
-proc mitosis::add-node {path rel type anc job} {
+proc mitosis::add-node {path rel type anc job root} {
     variable nodes; variable bytype
-    dict set nodes $path [dict create rel $rel type $type anc $anc job $job]
+    dict set nodes $path [dict create rel $rel type $type anc $anc job $job root $root]
     dict lappend bytype $type $path
 }
 
@@ -302,6 +341,7 @@ proc mitosis::plan {} {
     variable rows; variable edges; variable order; variable known
     variable nodes; variable bytype; variable J; variable ids
     variable outdirs; variable srcdirs; variable njobs
+    variable targets; variable tjobs
 
     set nodes {}; set bytype {}; set ids {}; set njobs 0; array unset J
     set known [known-list]
@@ -332,7 +372,7 @@ proc mitosis::plan {} {
             set rel [string range $f [expr {[string length $d]+1}] end]
             set ty [resolve $rel]
             if {$ty ne "" && $ty in $exts} {
-                add-node $f $rel $ty [list $ty] {}
+                add-node $f $rel $ty [list $ty] {} $f
                 lappend queue $f
             }
         }
@@ -357,32 +397,48 @@ proc mitosis::plan {} {
                 set o [out-path $ty $rel2]
                 dict set ph "\$$t" [list $o]
                 lappend outs $o
-                add-node $o $rel2 $ty [concat [dict get $n anc] $ty] $id
+                add-node $o $rel2 $ty [concat [dict get $n anc] $ty] $id [dict get $n root]
                 lappend queue $o
             }
             new-job $id [expand $tmpl $ph {}] [list $p] $outs
         }
     }
 
-    # folds: all files of a type into one named file
+    # folds: the objects of each declared target into that target's file
+    set tjobs {}
     dict for {key tmpl} $edges {
         lassign $key from to
         if {[string index [lindex $to 0] 0] eq "."} continue
         set t [lindex $to 0]
-        set src {}
-        if {[dict exists $bytype [canon $from]]} {set src [lsort [dict get $bytype [canon $from]]]}
-        if {![llength $src]} {
+        set all {}
+        if {[dict exists $bytype [canon $from]]} {set all [lsort [dict get $bytype [canon $from]]]}
+        if {![llength $all]} {
             error "mitosis: nothing to build for '$from' (no sources under: [join $srcdirs {, }])"
         }
-        if {![info exists ::$t]} {error "mitosis: variable '$t' is not set (default-target?)"}
-        set o [join-dir [dir-for $t] [set ::$t]]
-        set ph [dict create "\$$from" $src "\$$t" [list $o]]
-        set locals {}
-        if {![info exists ::ld]} {
-            dict set locals ld [list [expr {[any-anc $src .cpp] ? [var CPP c++] : [var CC cc]}]]
+        set found 0
+        dict for {tname topt} $targets {
+            if {[dict get $topt -role] ne $t} continue
+            incr found
+            set src {}
+            foreach p $all {if {[wants $topt [dict get $nodes $p root]]} {lappend src $p}}
+            if {![llength $src]} {error "mitosis: target '$tname' selects no inputs"}
+            set o [join-dir [dir-for $t] $tname]
+            if {[dict exists $tjobs $tname]} {error "mitosis: target '$tname' is produced twice"}
+            set ph [dict create "\$$from" $src "\$$t" [list $o]]
+            set locals {}
+            if {![info exists ::LD]} {
+                dict set locals LD [list [expr {[any-anc $src .cpp] ? [var CPP c++] : [var CC cc]}]]
+            }
+            dict for {k v} [dict get $topt -with] {dict set locals $k $v}
+            dict for {k v} [dict get $topt -add] {
+                if {[dict exists $locals $k]} {set cur [dict get $locals $k]} else {set cur [var $k]}
+                dict set locals $k [concat $cur $v]
+            }
+            set id [incr njobs]
+            dict set tjobs $tname $id
+            new-job $id [expand $tmpl $ph $locals] $src [list $o]
         }
-        set id [incr njobs]
-        new-job $id [expand $tmpl $ph $locals] $src [list $o]
+        if {!$found} {error "mitosis: no target of role '$t' is declared"}
     }
 
     # ordering edges: every job reading type B waits for all producers of type A
@@ -404,6 +460,41 @@ proc mitosis::plan {} {
             }
         }
     }
+}
+
+# does target options topt want the object that came from source root?
+proc mitosis::wants {topt root} {
+    set only [dict get $topt -only]
+    if {[llength $only]} {
+        set ok 0
+        foreach g $only {if {[string match $g $root]} {set ok 1; break}}
+        if {!$ok} {return 0}
+    }
+    foreach g [dict get $topt -not] {if {[string match $g $root]} {return 0}}
+    return 1
+}
+
+# restrict the plan to the named targets (all if none) and wire up the scheduler counts
+proc mitosis::select {names} {
+    variable J; variable ids; variable tjobs
+    if {[llength $names]} {
+        set stack {}
+        foreach nm $names {
+            if {![dict exists $tjobs $nm]} {
+                error "mitosis: unknown target '$nm' (declared: [join [dict keys $tjobs] {, }])"
+            }
+            lappend stack [dict get $tjobs $nm]
+        }
+        set seen {}
+        while {[llength $stack]} {
+            set stack [lassign $stack id]
+            if {[dict exists $seen $id]} continue
+            dict set seen $id 1
+            lappend stack {*}$J($id,deps)
+        }
+        set ids [lsort -integer [dict keys $seen]]
+    }
+    foreach id $ids {set J($id,rdeps) {}}
     foreach id $ids {
         set J($id,pending) [llength $J($id,deps)]
         foreach d $J($id,deps) {lappend J($d,rdeps) $id}
@@ -639,7 +730,7 @@ proc mitosis::clean {} {
 # ---------------------------------------------------------------------- main
 
 proc mitosis::usage {} {
-    puts stderr "usage: mitosis \[-C dir\] \[-j N\] \[-B\] \[-n\] \[-v\] \[clean\]"
+    puts stderr "usage: mitosis \[-C dir\] \[-j N\] \[-B\] \[-n\] \[-v\] \[clean | TARGET...\]"
 }
 
 proc mitosis::find-root {} {
@@ -654,7 +745,7 @@ proc mitosis::find-root {} {
 
 proc mitosis::main {argv} {
     variable force; variable dry; variable etc; variable builtin
-    set cmd build; set dir {}; set jopt {}
+    set cmd build; set dir {}; set jopt {}; set names {}
     while {[llength $argv]} {
         set a [lindex $argv 0]; set argv [lrange $argv 1 end]
         switch -regexp -- $a {
@@ -666,12 +757,14 @@ proc mitosis::main {argv} {
             {^-j$}          {set jopt [lindex $argv 0]; set argv [lrange $argv 1 end]}
             {^-j[0-9]+$}    {set jopt [string range $a 2 end]}
             {^clean$}       {set cmd clean}
-            default         {puts stderr "mitosis: unknown argument '$a'"; usage; return 2}
+            {^-}            {puts stderr "mitosis: unknown option '$a'"; usage; return 2}
+            default         {lappend names $a}
         }
     }
     if {$dir ne ""} {cd $dir}
     set root [find-root]
-    if {$root ne ""} {cd $root}
+    if {$root eq ""} {error "mitosis: no build.celmag in [pwd] or any parent directory"}
+    cd $root
     set ::PWD [pwd]
 
     # system layer: /etc/celmag/*.celmag, else the builtin defaults
@@ -681,12 +774,16 @@ proc mitosis::main {argv} {
     } else {
         uplevel #0 $builtin
     }
-    if {$root ne ""} {uplevel #0 [list source [file join $root build.celmag]]}
-    if {![info exists ::target]} {set ::target [file tail [pwd]].out}
+    uplevel #0 [list source [file join $root build.celmag]]
+    if {![llength $mitosis::used]} {
+        error "mitosis: build.celmag must select a digest with 'use NAME' (available: [join [digest-names] {, }])"
+    }
+    if {![dict size $mitosis::targets]} {target [file tail [pwd]].out}
     if {$jopt ne ""} {set ::jobs $jopt}
 
     plan
-    if {$cmd eq "clean"} {return [clean]}
+    if {$cmd eq "clean"} {select {}; return [clean]}
+    select $names
     return [run]
 }
 
