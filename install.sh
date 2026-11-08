@@ -22,12 +22,11 @@ if [ "$DONTCARE" = 0 ]; then
         die "TCL not installed (no tclsh in PATH), need >=TCL8.6." "" "$HINT"
     command -v sha256sum >/dev/null 2>&1 ||
         die "sha256sum not installed (no sha256sum in PATH), you need GNU coreutils or an executable alias." "" "$HINT"
-    TCLvout=$(echo 'puts [info tclversion]' | tclsh)
-    TCLv=$(echo $TCLvout | tr -d .)
-    [ "$TCLv" -ge 86 ] 2>/dev/null ||
+    TCLv=$(echo 'puts [info tclversion]' | tclsh)
+    [ "$(echo $TCLv | tr -d .)" -ge 86 ] 2>/dev/null ||
         die "need >=TCL8.6, found: ${TCLv:-nothing}. please check:" \
             "echo 'puts [info tclversion]' | tclsh" "" "$HINT"
-    echo "Found TCL $TCLvout, we expect 8.6 however later versions probably work."
+    echo "Found TCL $TCLv, we expect 8.6 however later versions probably work."
 fi
 
 # no TARGET means a user install, with data where mitosis looks first by default (XDG)

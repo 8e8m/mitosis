@@ -770,8 +770,35 @@ proc mitosis::clean {} {
 
 # ---------------------------------------------------------------------- main
 
-proc mitosis::usage {} {
-    puts stderr "usage: mitosis \[-C dir\] \[-j N\] \[-B\] \[-n\] \[-v\] \[--eval-path\] \[VAR=value ...\] \[clean | TARGET...\]"
+proc mitosis::usage {{add "0"}} {
+    puts -nonewline stderr "usage: mitosis \[-C dir\] \[-j N\] \[-B\] \[-n\] \[-v\] \[--eval-path\] \[VAR=value ...\] \[clean | TARGET...\]"
+    if {$add} { puts "; see --help"; } else { puts ""; }
+}
+proc mitosis::long-usage {} {
+    usage
+    puts stderr {
+	Build files according to a build.celmag found upward from the current directory
+	(mitosis runs from the directory containing it).
+
+	Options:
+	-C DIR        Change to DIR before doing anything.
+	-j N          Run up to N jobs in parallel.
+	-B            Unconditionally rebuild, ignoring cached results.
+	-n            Dry run: print commands without executing them.
+	-v            Verbose output.
+	--eval-path   Print the celmag directories found on the eval path and exit.
+
+	Arguments:
+	VAR=value     Set VAR for this run, overriding build.celmag and finalize scripts.
+	VAR+=value    Append to VAR after build.celmag and finalize scripts have run.
+	clean         Remove build outputs.
+	TARGET...     Build only the named targets (and their dependencies).
+
+	Without a target, the default targets are built.
+
+	-- See the mitosis executable file for precise documentation and programmatic details.
+	-- Authored by Claude and E.M.
+    }
 }
 
 proc mitosis::find-root {} {
@@ -791,7 +818,8 @@ proc mitosis::main {argv} {
     while {[llength $argv]} {
         set a [lindex $argv 0]; set argv [lrange $argv 1 end]
         switch -regexp -- $a {
-            {^(-h|--help)$} {usage; return 0}
+            {^-h$}          {usage "1"; return 0}
+	    {^--help$}      {long-usage; return 0}
             {^-B$}          {set force 1}
             {^-n$}          {set dry 1}
             {^-v$}          {set ::VERBOSE 1}
@@ -804,7 +832,7 @@ proc mitosis::main {argv} {
                 regexp {^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$} $a -> k plus v
                 lappend assigns $k [expr {$plus eq "+" ? "+=" : "="}] [regexp -all -inline {\S+} $v]
             }
-            {^-}            {puts stderr "mitosis: unknown option '$a'"; usage; return 2}
+            {^-}            {puts stderr "mitosis: unknown option '$a'"; usage "1"; return 2}
             default         {lappend names $a}
         }
     }
