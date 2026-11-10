@@ -25,11 +25,7 @@ A project is described by
 .BR build.mitosis.tcl ,
 which is searched for in the current directory and then each parent directory.
 Mitosis changes to the directory containing the project file before loading
-it and building. The older name
-.B build.celmag
-is accepted when
-.B build.mitosis.tcl
-is absent.
+it and building.
 .PP
 Run
 .B "mitosis -h"
@@ -315,11 +311,6 @@ Build failure, command-line error, or other fatal error.
 .TP
 .B build.mitosis.tcl
 Project build description, searched upward from the current directory.
-.TP
-.B build.celmag
-Legacy project-file name, used only when
-.B build.mitosis.tcl
-is absent.
 .TP
 .B .mitosis/
 Per-project cache and optional
