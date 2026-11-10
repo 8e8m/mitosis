@@ -1,6 +1,7 @@
 #!/usr/bin/env tclsh
 #
-# mitosis.tcl -- content-addressed, suffix-chaining build system.
+# mitosis.tcl -- Muscular build system.
+#                by Claude, and ChatGPT.
 #
 #   mitosis [-C dir] [-j N] [-Bnqskpdv] [--shuffle[=MODE]] [--trace] [--eval-path]
 #           [VAR=value ...] [clean | TARGET...]
