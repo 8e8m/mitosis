@@ -3,12 +3,17 @@
 mitosis \- content-addressed, suffix-chaining build system
 .SH SYNOPSIS
 .B mitosis
-.RI [ options ]
+.RI [ -C
+.RI TARGET-DIRECTORY ]
+.RI [ -j N ]
+.RI [ -Bvsqnkpd ]
+.RI [ --trace ]
+.RI [ --shuffle[=MODE] ]
+.RI [ --eval-path ]
+.RI [ -h|--help ]
 .RI [ VAR = value ...]
 .RI [ clean | target ...]
 .PP
-.B mitosis
-.BR -h | --help
 .SH DESCRIPTION
 .B mitosis
 is a build engine whose build graph is described in plain Tcl. Source and
@@ -38,9 +43,9 @@ or
 .BR more (1).
 .SH OPTIONS
 .TP
-.B -C DIR
+.B -C TARGET-DIRECTORY
 Change to
-.I DIR
+.I TARGET-DIRECTORY
 before searching for the project file.
 .TP
 .B -j N
@@ -425,12 +430,6 @@ Record timing data for one build:
 .PP
 .nf
 MITOSIS_GRAPH=1 mitosis
-.fi
-.PP
-Display the manual:
-.PP
-.nf
-mitosis --help
 .fi
 .SH SEE ALSO
 .BR man (1),

@@ -57,7 +57,6 @@
 # Layers are loaded in this order: eval-path layers, build.mitosis.tcl,
 # finalize scripts, then command-line assignments. `set-default` is first-wins.
 # build.mitosis.tcl is searched upward from cwd; mitosis runs from its directory.
-# build.celmag is accepted as a legacy filename when build.mitosis.tcl is absent.
 #
 # Target GLOBS are Tcl `string match` patterns on originating source paths,
 # e.g. source/test/*. Per-target -with/-add/-only/-not options affect only the
@@ -1370,8 +1369,7 @@ proc mitosis::manual {} {
 proc mitosis::find-root {} {
     set d [pwd]
     while 1 {
-        if {[file isfile [file join $d build.mitosis.tcl]] ||
-            [file isfile [file join $d build.celmag]]} { return $d }
+        if {[file isfile [file join $d build.mitosis.tcl]]} { return $d }
         set p [file dirname $d]
         if {$p eq $d} { return {} }
         set d $p
@@ -1488,7 +1486,7 @@ proc mitosis::main {argv} {
     if {$dir ne ""} { cd $dir }
 
     set root [find-root]
-    if {$root eq ""} { error "mitosis: no build.mitosis.tcl (or legacy build.celmag) found in [pwd] or any parent" }
+    if {$root eq ""} { error "mitosis: no build.mitosis.tcl found in [pwd] or any parent" }
     cd $root
     set ::PWD [pwd]
 
@@ -1502,7 +1500,6 @@ proc mitosis::main {argv} {
     # Load eval-path layers, then the project configuration.
     foreach f [layer-files] { uplevel #0 [list source $f] }
     set buildfile [file join $root build.mitosis.tcl]
-    if {![file isfile $buildfile]} { set buildfile [file join $root build.celmag] }
     uplevel #0 [list source $buildfile]
 
     # Import the environment/default only if no layer or project set it.
