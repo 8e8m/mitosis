@@ -1,6 +1,6 @@
 * Mitosis
 
-Muscularized version of [[https://github.com/basedproject/skel][Skelington Build System]] for the [[https://github.com/basedproject/celmag][Cellmagoria Game]].
+Muscularized version of [[https://github.com/basedproject/skel][Skelington Build System]] for the [[https://github.com/basedproject/celmag][Celmagoria Game]].
 
 Replaces Skelington's GNU/Make usage entirely, with a translation of `GNUmakefile` and `use c` as a digest.
 
