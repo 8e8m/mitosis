@@ -3,17 +3,12 @@
 mitosis \- content-addressed, suffix-chaining build system
 .SH SYNOPSIS
 .B mitosis
-.RI [ -C
-.RI TARGET-DIRECTORY ]
-.RI [ -j N ]
-.RI [ -Bvsqnkpd ]
-.RI [ --trace ]
-.RI [ --shuffle[=MODE] ]
-.RI [ --eval-path ]
-.RI [ -h|--help ]
+.RI [ options ]
 .RI [ VAR = value ...]
 .RI [ clean | target ...]
 .PP
+.B mitosis
+.BR -h | --help
 .SH DESCRIPTION
 .B mitosis
 is a build engine whose build graph is described in plain Tcl. Source and
@@ -39,9 +34,9 @@ or
 .BR more (1).
 .SH OPTIONS
 .TP
-.B -C TARGET-DIRECTORY
+.B -C DIR
 Change to
-.I TARGET-DIRECTORY
+.I DIR
 before searching for the project file.
 .TP
 .B -j N
@@ -49,7 +44,29 @@ Run up to
 .I N
 jobs concurrently. A value supplied as
 .B -j4
-is also accepted.
+is also accepted. The default is the value of
+.BR MITOSIS_JOBS ,
+which defaults to the number of processors reported by
+.BR nproc (1).
+.TP
+.B "-l [LOAD], --load-average[=LOAD], --max-load[=LOAD]"
+Set a system-load threshold for starting additional jobs. LOAD is a
+non-negative floating-point number. The default is
+.B MITOSIS_LOAD
+or, when unset, the number of processors reported by
+.BR nproc (1)
+plus one. A bare
+.B -l
+removes the load limit for this invocation. The load limit never interrupts
+jobs already running. If no Mitosis job is running, one ready job is always
+allowed so an externally overloaded system cannot prevent build progress.
+On Linux, Mitosis uses the current runnable-task count from
+.BR /proc/loadavg
+and waits when that count exceeds LOAD. Where that interface is unavailable,
+it uses the one-minute load average reported by
+.BR sysctl (8)
+and waits when the average reaches LOAD. If neither source is available,
+Mitosis warns and ignores the load limit.
 .TP
 .B -B
 Rebuild everything, ignoring cached results.
@@ -235,6 +252,29 @@ layer file intentionally disables a same-named layer from later directories.
 For digests, the first matching
 .B digest/NAME.tcl
 wins.
+.PP
+.B MITOSIS_JOBS
+and
+.B MITOSIS_LOAD
+may be set in the environment or in
+.BR build.mitosis.tcl .
+They default to
+.B nproc
+and
+.B nproc+1
+respectively. The command-line options
+.B -j
+and
+.B -l
+override these values. The older project variable
+.B jobs
+is accepted as a compatibility fallback when
+.B MITOSIS_JOBS
+is not set.
+.PP
+Set
+.B MITOSIS_LOAD
+to an empty value in the project file to disable load limiting by default.
 .SS Evaluation path
 If
 .B MITOSIS_EVAL_PATH
@@ -411,6 +451,18 @@ Build with four concurrent jobs, forcing all outputs to be rebuilt:
 mitosis -j4 -B
 .fi
 .PP
+Set the concurrency and load limits for one invocation:
+.PP
+.nf
+MITOSIS_JOBS=8 MITOSIS_LOAD=9 mitosis
+.fi
+.PP
+Remove the default load limit for one invocation:
+.PP
+.nf
+mitosis -l
+.fi
+.PP
 Print the plan without executing commands:
 .PP
 .nf
@@ -422,9 +474,15 @@ Record timing data for one build:
 .nf
 MITOSIS_GRAPH=1 mitosis
 .fi
+.PP
+Display the manual:
+.PP
+.nf
+mitosis --help
+.fi
 .SH SEE ALSO
 .BR man (1),
 .BR make (1),
 .BR tclsh (1)
 .SH AUTHORS
-Mitosis project contributors.
+Claude, ChatGPT, and noone in particular.

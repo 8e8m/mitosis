@@ -3,17 +3,20 @@
 # mitosis.tcl -- Muscular build system.
 #                by Claude, and ChatGPT.
 #
-#   mitosis [-C dir] [-j N] [-Bnqskpdv] [--shuffle[=MODE]] [--trace] [--eval-path]
+#   mitosis [-C dir] [-j N] [-l [LOAD]] [-Bnqskpdv] [--shuffle[=MODE]] [--trace] [--eval-path]
 #           [VAR=value ...] [clean | TARGET...]
 #   mitosis -h | --help
 #
-# Model: file DAG built from suffix edges. Sources are globbed from "at" rows.
+# Model: file DAG built from suffix edges.  Sources are globbed from "at" rows.
 # Each file carries its derivation in its name (foo.c -> foo.c.o -> foo.c.o.d).
 # A job is up to date when its recorded "parts" (argv, tool identity, input
-# hashes, recorded dep hashes) equal the current ones. Not mtime.
+# hashes, recorded dep hashes) equal the current ones.  Not mtime.
 #
 # The user manual is mitosis(1), displayed by `mitosis -h` or `--help`.
 #
+# Concurrency: MITOSIS_JOBS defaults to nproc; MITOSIS_LOAD defaults to
+# nproc+1. Both may be set in the environment or build.mitosis.tcl. `-j`
+# overrides the job cap; `-l` overrides the load limit (bare -l disables it).
 # Timing/graph data is opt-in: set MITOSIS_GRAPH=1 in the environment or use
 # `set MITOSIS_GRAPH 1` in build.mitosis.tcl. Records append to
 # .mitosis/timings.csv; they never participate in cache validity.
@@ -127,6 +130,9 @@ namespace eval mitosis {
     variable shuffle  none   ;# none | random | reverse
     variable seed     {}
     variable maxjobs  1
+    variable loadlimit {}    ;# empty disables load admission control
+    variable load_timer {}  ;# pending periodic load recheck
+    variable load_warned 0
     variable sim      0      ;# dry or question: nothing really runs
     variable dirty    {}     ;# sim only: job ids that would run
     variable skipped  {}     ;# -k: job ids blocked by a failed dependency
@@ -708,7 +714,7 @@ proc mitosis::select {names} {
         set ids $sel
     }
 
-    # Wire rdeps and pending. The selection is dependency-closed, so every
+    # Wire rdeps and pending.  The selection is dependency-closed, so every
     # dep of a selected job is itself selected.
     foreach id $ids { jset $id rdeps {}; jset $id pending [llength [jget $id deps]] }
     foreach id $ids {
@@ -761,7 +767,7 @@ proc mitosis::tool-id {cmd} {
     return [dict get $tmemo $cmd]
 }
 
-# Everything a job's result depends on, as a dict. Stored in the db after a
+# Everything a job's result depends on, as a dict.  Stored in the db after a
 # successful run and compared field by field later, which is both the cache
 # test and the explanation for --trace (no hashing of the key needed).
 proc mitosis::job-parts {id extradeps} {
@@ -774,7 +780,7 @@ proc mitosis::job-parts {id extradeps} {
     return [dict create argv $argv tool [tool-id [lindex $argv 0]] ins $ih deps $dh]
 }
 
-# Why must this job run? Returns "" when it is up to date.
+# Why must this job run?  Returns "" when it is up to date.
 # In sim mode (-n, -q) nothing really runs, so a job whose dependency would
 # run is itself assumed to run.
 proc mitosis::judge {id} {
@@ -806,7 +812,7 @@ proc mitosis::judge {id} {
     foreach {sect what} {ins input deps dependency} {
         if {![dict exists $old $sect]} { return "$what list changed" }
         set before [dict get $old $sect]
-        set after [dict get $new $sect]
+        set after  [dict get $new $sect]
         dict for {p h} $before {
             if {![dict exists $after $p]} { return "$what removed: $p" }
             if {[dict get $after $p] ne $h} { return "$what changed: $p" }
@@ -821,8 +827,7 @@ proc mitosis::judge {id} {
 # Make-style dep file; returns deps not already among ins.
 proc mitosis::parse-depfile {file ins} {
     if {[catch {open $file r} fd]} { return {} }
-    set t [read $fd]
-    close $fd
+    set t [read $fd]; close $fd
     set t [string map [list "\\\r\n" " " "\\\n" " "] $t]
     set colon [string first : $t]
     if {$colon < 0} { return {} }
@@ -841,8 +846,7 @@ proc mitosis::db-load {} {
     set db {}
     if {![file exists .mitosis/db]} return
     if {[catch {open .mitosis/db r} fd]} return
-    set d [read $fd]
-    close $fd
+    set d [read $fd]; close $fd
     if {![catch {dict size $d}]} { set db $d }
 }
 
@@ -1127,6 +1131,88 @@ proc mitosis::on-readable {id ch} {
     pump
 }
 
+# Read current system pressure. Linux exposes the number of currently runnable
+# scheduling entities in /proc/loadavg; this is the same fast path used by
+# GNU make. Other supported Unix systems fall back to the one-minute average
+# from sysctl. Return {runnable N}, {average N}, or {} if unavailable.
+proc mitosis::load-reading {} {
+    set path /proc/loadavg
+    if {[file readable $path]} {
+        set ch ""
+        if {![catch {
+            set ch [open $path r]
+            set data [read $ch]
+            close $ch
+            set ch ""
+        }]} {
+            set fields [regexp -all -inline {\S+} $data]
+            if {[llength $fields] >= 4 &&
+                [regexp {^([0-9]+)/[0-9]+$} [lindex $fields 3] -> runnable]} {
+                return [list runnable $runnable]
+            }
+        } elseif {$ch ne ""} {
+            catch {close $ch}
+        }
+    }
+
+    # BSD and macOS expose the load averages through vm.loadavg.
+    set sysctl [auto_execok sysctl]
+    if {$sysctl ne "" &&
+        ![catch {exec {*}$sysctl -n vm.loadavg 2>@1} data]} {
+        if {[regexp {^\s*\{?\s*([0-9]+(?:\.[0-9]+)?)} $data -> average]} {
+            return [list average $average]
+        }
+    }
+    return {}
+}
+
+# GNU make-compatible admission policy: never interrupt jobs already running;
+# if this invocation has no child running, always admit one job so an externally
+# overloaded machine cannot prevent progress. Linux compares runnable tasks;
+# the fallback compares the one-minute load average.
+proc mitosis::load-blocked {} {
+    variable running
+    variable loadlimit
+    variable load_warned
+    if {$running == 0 || $loadlimit eq ""} { return 0 }
+
+    set reading [load-reading]
+    if {$reading eq ""} {
+        if {!$load_warned} {
+            puts stderr "mitosis: warning: cannot read system load; ignoring MITOSIS_LOAD"
+            set load_warned 1
+        }
+        set loadlimit {}
+        return 0
+    }
+    lassign $reading kind current
+    if {$kind eq "runnable"} {
+        return [expr {$current > $loadlimit}]
+    }
+    return [expr {$current >= $loadlimit}]
+}
+
+proc mitosis::cancel-load-poll {} {
+    variable load_timer
+    if {$load_timer ne ""} {
+        after cancel $load_timer
+        set load_timer {}
+    }
+}
+
+proc mitosis::schedule-load-poll {} {
+    variable load_timer
+    if {$load_timer eq ""} {
+        set load_timer [after 1000 ::mitosis::load-poll]
+    }
+}
+
+proc mitosis::load-poll {} {
+    variable load_timer
+    set load_timer {}
+    pump
+}
+
 # Take the next ready job according to --shuffle.
 proc mitosis::pick-ready {} {
     variable ready
@@ -1152,8 +1238,7 @@ proc mitosis::check-stall {} {
     if {($failed && !$keep) || $remaining == 0} { set done 1; return }
     if {![llength $ready]} {
         puts stderr "mitosis: dependency cycle detected"
-        set failed 1
-        set done 1
+        set failed 1; set done 1
     }
 }
 
@@ -1170,8 +1255,16 @@ proc mitosis::pump {} {
     variable trace
     variable dirty
     variable stale
+
+    cancel-load-poll
     while {!$done && !($failed && !$keep) && $running < $maxjobs && [llength $ready]} {
-        set id [pick-ready]
+        # Check before every admission: the first job is always allowed, but
+        # later jobs must respect the load threshold.
+        if {[load-blocked]} {
+            schedule-load-poll
+            break
+        }
+        set id  [pick-ready]
         set out [lindex [jget $id outs] 0]
         set why [judge $id]
         if {$why eq ""} {
@@ -1217,21 +1310,19 @@ proc mitosis::run {} {
     variable shuffle
     variable seed
     variable graph
+    variable loadlimit
+    variable load_timer
+    variable load_warned
 
-    set ready {}
-    set dirty {}
-    set skipped {}
+    cancel-load-poll
+    set load_warned 0
+    set ready {}; set dirty {}; set skipped {}
     foreach id $ids { if {[jget $id pending] == 0} { lappend ready $id } }
     set remaining [llength $ids]
-    set running 0
-    set failed 0
-    set done 0
-    set nran 0
-    set nfailed 0
-    set stale 0
+    set running 0; set failed 0; set done 0; set nran 0; set nfailed 0; set stale 0
     set sim [expr {$dry || $question}]
-    set maxjobs [var jobs 1]
-    if {![string is integer -strict $maxjobs] || $maxjobs < 1} { set maxjobs 1 }
+    set maxjobs $::MITOSIS_JOBS
+    set loadlimit $::MITOSIS_LOAD
 
     if {$shuffle eq "random"} {
         if {$seed eq ""} { set seed [expr {[clock milliseconds] % 1000000}] }
@@ -1254,7 +1345,7 @@ proc mitosis::run {} {
     }
     if {!$dry && !$silent} {
         set total [llength $ids]
-        puts "mitosis: $total jobs, $nran run, [expr {$total - $nran}] up to date"
+        puts "mitosis: $total jobs, $nran run, [expr {$total - $nran} ] up to date"
     }
     return 0
 }
@@ -1303,19 +1394,19 @@ proc mitosis::print-db {} {
     variable g0
     puts "# mitosis data base"
     puts "# eval path: [join $evalpath {, }]"
-    puts "# digests: $used"
+    puts "# digests:   $used"
     puts "\n# variables"
     foreach v [lsort [info globals]] {
         if {$v in $g0 || [array exists ::$v]} continue
         puts "$v = [set ::$v]"
     }
     puts "\n# rules"
-    dict for {d exts} $rows { puts [list at $d $exts] }
-    dict for {a c} $aliases { puts [list alias $c $a] }
-    foreach e $depexts { puts [list depfile $e] }
+    dict for {d exts} $rows    { puts [list at $d $exts] }
+    dict for {a c} $aliases    { puts [list alias $c $a] }
+    foreach e $depexts         { puts [list depfile $e] }
     dict for {type name} $phases { puts [list phase $type $name] }
     dict for {key tmpl} $edges { puts [list relate {*}$key $tmpl] }
-    foreach o $order { puts [list relate {*}$o] }
+    foreach o $order           { puts [list relate {*}$o] }
     dict for {n opts} $targets { puts [list target $n {*}$opts] }
     puts "\n# files"
     dict for {p n} $nodes {
@@ -1334,7 +1425,7 @@ proc mitosis::print-db {} {
 
 proc mitosis::usage {{hint 0}} {
     puts -nonewline stderr \
-        "usage: mitosis \[-C dir\] \[-j N\] \[-Bnqskpdv\] \[--shuffle\[=MODE\]\] \[--trace\] \[--eval-path\] \[VAR=value ...\] \[clean | TARGET...\]"
+        "usage: mitosis \[-C dir\] \[-j N\] \[-l \[LOAD\]\] \[-Bnqskpdv\] \[--shuffle\[=MODE\]\] \[--trace\] \[--eval-path\] \[VAR=value ...\] \[clean | TARGET...\]"
     if {$hint} { puts stderr "; see 'mitosis -h'" } else { puts stderr "" }
 }
 
@@ -1376,7 +1467,7 @@ proc mitosis::find-root {} {
     }
 }
 
-# One-letter flags. Returns 1 if c was a flag.
+# One-letter flags.  Returns 1 if c was a flag.
 proc mitosis::set-flag {c} {
     variable force
     variable dry
@@ -1398,6 +1489,11 @@ proc mitosis::set-flag {c} {
         default { return 0 }
     }
     return 1
+}
+
+proc mitosis::valid-load {value} {
+    # Non-negative decimal only; reject NaN, infinity, signs and locale syntax.
+    return [regexp {^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$} $value]
 }
 
 proc mitosis::set-shuffle {mode} {
@@ -1423,9 +1519,10 @@ proc mitosis::main {argv} {
     variable g0
 
     set g0 [info globals]
-    set cmd build
-    set dir {}
+    set cmd  build
+    set dir  {}
     set jopt {}
+    set lopt __unset__
     set names {}
     set longflags {silent s quiet s question q print-data-base p
                    just-print n dry-run n recon n keep-going k}
@@ -1437,6 +1534,17 @@ proc mitosis::main {argv} {
                 set-flag [dict get $longflags $opt]
             } elseif {$opt eq "help"} {
                 return [manual]
+            } elseif {$opt in {load-average max-load}} {
+                if {$eq ne ""} {
+                    set lopt $val
+                } elseif {[llength $argv] && [valid-load [lindex $argv 0]]} {
+                    set argv [lassign $argv lopt]
+                } else {
+                    set lopt {}
+                }
+                if {$lopt ne "" && ![valid-load $lopt]} {
+                    puts stderr "mitosis: invalid load limit '$lopt'"; usage 1; return 2
+                }
             } elseif {$opt eq "trace"} {
                 set trace 1
             } elseif {$opt eq "eval-path"} {
@@ -1446,23 +1554,34 @@ proc mitosis::main {argv} {
             } else {
                 puts stderr "mitosis: unknown option '$a'"; usage 1; return 2
             }
-        } elseif {[regexp {^-[A-Za-z]+[0-9]*$} $a]} {
+        } elseif {[regexp {^-[A-Za-z]+([0-9]+(\.[0-9]+)?)?$} $a]} {
             set chars [split [string range $a 1 end] ""]
             set n [llength $chars]
             for {set i 0} {$i < $n} {incr i} {
                 set c [lindex $chars $i]
                 if {$c eq "h"} { return [manual] }
                 if {[set-flag $c]} continue
-                if {$c in {C j}} {
-                    # Value is the rest of the cluster, else the next word.
+                if {$c in {C j l}} {
+                    # -C and -j require a value.  -l follows make: a numeric
+                    # value sets the limit; bare -l removes the current limit.
                     set v [join [lrange $chars [expr {$i+1}] end] ""]
-                    if {$v eq ""} {
-                        if {![llength $argv]} {
-                            puts stderr "mitosis: option -$c needs an argument"; usage 1; return 2
+                    if {$c eq "l"} {
+                        if {$v eq "" && [llength $argv] && [valid-load [lindex $argv 0]]} {
+                            set argv [lassign $argv v]
                         }
-                        set argv [lassign $argv v]
+                        if {$v ne "" && ![valid-load $v]} {
+                            puts stderr "mitosis: invalid load limit '$v'"; usage 1; return 2
+                        }
+                        set lopt $v
+                    } else {
+                        if {$v eq ""} {
+                            if {![llength $argv]} {
+                                puts stderr "mitosis: option -$c needs an argument"; usage 1; return 2
+                            }
+                            set argv [lassign $argv v]
+                        }
+                        if {$c eq "C"} { set dir $v } else { set jopt $v }
                     }
-                    if {$c eq "C"} { set dir $v } else { set jopt $v }
                     break
                 }
                 puts stderr "mitosis: unknown option '-$c'"; usage 1; return 2
@@ -1510,19 +1629,40 @@ proc mitosis::main {argv} {
         error "mitosis: build.mitosis.tcl must call 'use NAME' (available: [join [digest-names] {, }])"
     }
 
+    # Canonical concurrency settings. Preserve the old `jobs` project variable
+    # as a compatibility fallback, but prefer the new MITOSIS_* names and their
+    # environment variables. Defaults are nproc and nproc+1 respectively.
+    set ncpu [nproc]
+    if {![info exists ::MITOSIS_JOBS] && ![info exists ::env(MITOSIS_JOBS)] && [info exists ::jobs]} {
+        set ::MITOSIS_JOBS $::jobs
+    }
+    set-default MITOSIS_JOBS $ncpu
+    set-default MITOSIS_LOAD [expr {$ncpu + 1}]
+
     # Finalize scripts run after build.mitosis.tcl, before planning.
     foreach script $finals { uplevel #0 $script }
 
-    if {![info exists ::jobs]} { set ::jobs [nproc] }
-
     # Command-line assignments beat everything (both = and +=).
+    set legacy_jobs_arg 0
+    set canonical_jobs_arg 0
     foreach {k op v} $assigns {
+        if {$k eq "jobs"} { set legacy_jobs_arg 1 }
+        if {$k eq "MITOSIS_JOBS"} { set canonical_jobs_arg 1 }
         if {$op eq "="} { set ::$k $v } else { lappend ::$k {*}$v }
     }
+    if {$legacy_jobs_arg && !$canonical_jobs_arg} { set ::MITOSIS_JOBS $::jobs }
 
     if {![dict size $targets]} { target [file tail [pwd]].out }
 
-    if {$jopt ne ""} { set ::jobs $jopt }
+    if {$jopt ne ""} { set ::MITOSIS_JOBS $jopt }
+    if {$lopt ne "__unset__"} { set ::MITOSIS_LOAD $lopt }
+
+    if {![string is integer -strict $::MITOSIS_JOBS] || $::MITOSIS_JOBS < 1} {
+        error "mitosis: MITOSIS_JOBS must be a positive integer (got '$::MITOSIS_JOBS')"
+    }
+    if {$::MITOSIS_LOAD ne "" && ![valid-load $::MITOSIS_LOAD]} {
+        error "mitosis: MITOSIS_LOAD must be a non-negative number or empty to disable (got '$::MITOSIS_LOAD')"
+    }
 
     if {![string is boolean -strict $::MITOSIS_GRAPH]} {
         error "mitosis: MITOSIS_GRAPH must be a boolean (0 or 1)"
@@ -1530,9 +1670,7 @@ proc mitosis::main {argv} {
     set ::mitosis::graph [expr {$::MITOSIS_GRAPH ? 1 : 0}]
 
     # Start before planning so the run row includes planning and execution.
-    if {$graph && !$dry && !$question && $cmd eq "build"} {
-        timing-start
-    }
+    if {$graph && !$dry && !$question && $cmd eq "build"} { timing-start }
 
     plan
     if {$printdb && !$question} { print-db }

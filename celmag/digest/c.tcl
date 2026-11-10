@@ -8,6 +8,7 @@ proc pick-cc {preferGcc} {
     foreach c [expr {$preferGcc ? {gcc clang} : {clang gcc}}] {if {[have $c]} {return $c}}
     return cc
 }
+
 proc cxx-of {cc} {
     set words [list {*}$cc]
     for {set i 0} {$i < [llength $words]} {incr i} {
