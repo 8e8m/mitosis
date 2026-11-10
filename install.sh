@@ -34,7 +34,7 @@ if [ "$DONTCARE" = 0 ]; then
     [ "$(echo "$TCLv" | tr -d .)" -ge 86 ] 2>/dev/null ||
         die "need >=TCL8.6, found: ${TCLv:-nothing}. please check:" \
             "echo 'puts [info tclversion]' | tclsh" "" "$HINT"
-    echo "Found TCL $TCLv, we expect 8.6 however later versions probably work."
+    echo "Found TCL $TCLv. We expect >=8.6."
 fi
 
 [ -f mitosis.tcl ] || die "mitosis.tcl not found in $(pwd)."
