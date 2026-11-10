@@ -1,5 +1,5 @@
 # digest c -- C and C++ (and gperf), objects named by accumulated suffix (foo.c -> foo.c.o).
-# Select it from build.celmag with:  use c
+# Select it from build.mitosis.tcl with:  use c
 #
 # Everything C-specific lives here, none of it in mitosis itself: the edges, the toolchain
 # choice and its default flags.  `have` is a mitosis helper (is this program on PATH).
@@ -9,7 +9,16 @@ proc pick-cc {preferGcc} {
     return cc
 }
 proc cxx-of {cc} {
-    switch -- $cc {clang {return clang++} gcc {return g++} default {return c++}}
+    set words [list {*}$cc]
+    for {set i 0} {$i < [llength $words]} {incr i} {
+        set c [lindex $words $i]
+        if {![regexp {^(clang|gcc)(-[0-9.]+)?$} [file tail $c] -> kind version]} {continue}
+        set name [expr {$kind eq "clang" ? "clang++" : "g++"}]
+        append name $version
+        if {[string first / $c] >= 0} {set name [file join [file dirname $c] $name]}
+        return [lreplace $words $i $i $name]
+    }
+    return c++
 }
 
 set-default PREFER_GCC  0
@@ -35,3 +44,9 @@ relate .gperf.h .cpp
 relate .c   {.o .d}     {$CC  -MMD -MF $.d $incdirs $CFLAGS   $CPPFLAGS -c $.c   -o $.o}
 relate .cpp {.o .d}     {$CPP -MMD -MF $.d $incdirs $CXXFLAGS $CPPFLAGS -c $.cpp -o $.o}
 relate .o   target      {$LD -o $target $.o $LDFLAGS}
+
+# Timing groups are declared by the digest, not inferred by mitosis.
+# Set MITOSIS_GRAPH=1 (or `set MITOSIS_GRAPH 1` in build.mitosis.tcl)
+# to collect per-job timings and direct source line counts.
+phase .o compile
+phase target link

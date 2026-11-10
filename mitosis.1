@@ -1,0 +1,440 @@
+.TH MITOSIS 1 "November 2026" "Mitosis" "User Commands"
+.SH NAME
+mitosis \- content-addressed, suffix-chaining build system
+.SH SYNOPSIS
+.B mitosis
+.RI [ options ]
+.RI [ VAR = value ...]
+.RI [ clean | target ...]
+.PP
+.B mitosis
+.BR -h | --help
+.SH DESCRIPTION
+.B mitosis
+is a build engine whose build graph is described in plain Tcl. Source and
+intermediate files are related by suffix rules; each job is cached using its
+command, tool identity, input contents, and recorded dependency contents.
+The cache is content-addressed rather than based on modification times.
+.PP
+A project is described by
+.BR build.mitosis.tcl ,
+which is searched for in the current directory and then each parent directory.
+Mitosis changes to the directory containing the project file before loading
+it and building. The older name
+.B build.celmag
+is accepted when
+.B build.mitosis.tcl
+is absent.
+.PP
+Run
+.B "mitosis -h"
+or
+.B "mitosis --help"
+to display this manual through
+.BR man (1).
+The manual viewer uses the user's configured pager, normally
+.BR less (1)
+or
+.BR more (1).
+.SH OPTIONS
+.TP
+.B -C DIR
+Change to
+.I DIR
+before searching for the project file.
+.TP
+.B -j N
+Run up to
+.I N
+jobs concurrently. A value supplied as
+.B -j4
+is also accepted.
+.TP
+.B -B
+Rebuild everything, ignoring cached results.
+.TP
+.B -v
+Print full command lines.
+.TP
+.BR -s , --silent , --quiet
+Do not print command echoes or the final summary. Output and diagnostics
+from the executed commands are still preserved.
+.TP
+.BR -q , --question
+Run nothing and print nothing. Exit with status 0 if the requested targets
+are up to date, or 1 if a build would be needed.
+.TP
+.BR -n , --just-print , --dry-run , --recon
+Print the commands that would run, but do not execute them. Jobs downstream
+of a job that would run are also listed because whether an output would be
+identical (and therefore cut off) is unknowable without executing it.
+.TP
+.BR -k , --keep-going
+After a failure, continue running jobs that do not depend on the failed job.
+.TP
+.BR -p , --print-data-base
+Print the rules, variables, planned files, and job graph, then continue with
+the build.
+.TP
+.B -d
+Enable debug output about planning and up-to-date decisions. This implies
+.BR --trace .
+.TP
+.B --trace
+Explain why each job runs, then print its command.
+.TP
+.B --shuffle[=MODE]
+Change the order in which ready jobs are scheduled. MODE may be
+.BR none ,
+.BR random ,
+.BR reverse ,
+or an integer seed for a repeatable random order. The default when the
+option is given without a value is
+.BR random .
+Shuffling helps expose missing dependency edges. Inputs to a fold/link job
+are not reordered, because doing so would change its cache key.
+.TP
+.B --eval-path
+Print the resolved evaluation-path directories and exit.
+.TP
+.BR -h , --help
+Display the
+.B mitosis(1)
+manual using
+.BR man (1).
+Single-letter options may be clustered (for example,
+.BR -nk ).
+.SH ARGUMENTS
+.TP
+.I VAR=value
+Set a variable for this invocation. Command-line assignments override
+values from the project file and finalization scripts.
+.TP
+.I VAR+=value
+Append words to a variable after the project file and finalization scripts
+have run.
+.TP
+.B clean
+Remove build outputs, the build cache, and optional timing history.
+.TP
+.I TARGET ...
+Build only the named targets and their dependencies. If no target is named,
+all declared targets are built. If no targets are declared, Mitosis creates
+one named after the project directory with
+.B .out
+appended.
+.PP
+Target source filters use Tcl
+.B string match
+patterns against originating source paths. Per-target
+.BR -with ,
+.BR -add ,
+.BR -only ,
+and
+.B -not
+options affect the final fold command only; compilation flags are shared.
+.SH PROJECT FILE
+The project file is plain Tcl and must select at least one digest with
+.BR use .
+The following commands are provided by the engine:
+.TP
+.B at DIR EXTS
+Add source extensions found in
+.IR DIR .
+Multiple declarations are additive.
+.TP
+.B alias CANON NAMES
+Treat the listed extension names as the canonical extension for edge matching.
+.TP
+.B relate FROM TO [CMD]
+Declare a suffix edge. A
+.I TO
+value beginning with a dot appends that suffix to each input path. A bare
+.I TO
+folds all matching inputs into one output. Omitting
+.I CMD
+creates an ordering-only edge.
+.TP
+.B depfile EXT
+Declare this output extension to contain make-style dependency information.
+.TP
+.B phase TYPE NAME
+Assign a semantic phase name to jobs producing
+.IR TYPE .
+This is used by optional timing reports; the engine does not infer language-
+specific phases.
+.TP
+.B use NAME
+Load the named digest. There is no default digest.
+.TP
+.B set-default V X
+Set variable
+.I V
+only if it has not already been set. An environment variable of the same
+name is imported when the variable is first defaulted.
+.TP
+.B set-add V items...
+Append items to list variable
+.IR V .
+.TP
+.B target NAME [options]
+Declare a final target. Target options are:
+.RS
+.TP
+.B -only GLOBS
+Keep only objects originating from matching source paths.
+.TP
+.B -not GLOBS
+Drop objects originating from matching source paths.
+.TP
+.B -with {V X...}
+Replace variables for this target's final fold command.
+.TP
+.B -add {V X...}
+Append to variables for this target's final fold command.
+.TP
+.B -role ROLE
+Select the fold-edge role filled by this target. The default is
+.BR target .
+.RE
+.TP
+.B default-target NAME
+Declare the default target using the project's defaults.
+.TP
+.B finalize SCRIPT
+Run
+.I SCRIPT
+after the project file and before planning. Finalization scripts are used
+by evaluation-path layers to adjust the completed project configuration.
+.PP
+Command templates are split into words when declared. In a template,
+.B $.EXT
+expands to the input or output file of that type (a list for a fold),
+.B $var
+splices the named list variable into separate arguments, and
+.B prefix$var
+substitutes a variable within a word.
+.SH CONFIGURATION AND PRECEDENCE
+Environment variables are imported when a project or layer first calls
+.BR set-default .
+Configuration is loaded in this order:
+.IP 1. 4
+Evaluation-path layers, in name order.
+.IP 2. 4
+The project's
+.BR build.mitosis.tcl .
+.IP 3. 4
+Finalization scripts registered by layers.
+.IP 4. 4
+Command-line assignments. These have final precedence; append assignments
+are applied after finalization.
+.PP
+The first evaluation-path directory containing a layer name wins. An empty
+layer file intentionally disables a same-named layer from later directories.
+For digests, the first matching
+.B digest/NAME.tcl
+wins.
+.SS Evaluation path
+If
+.B MITOSIS_EVAL_PATH
+is set, its colon-separated directories are used. Otherwise Mitosis checks:
+.IP \(bu 3
+.B $XDG_CONFIG_HOME/mitosis
+(or
+.B ~/.config/mitosis
+when unset),
+.IP \(bu 3
+.B $XDG_DATA_HOME/mitosis/celmag
+(or
+.B ~/.local/share/mitosis/celmag
+when unset),
+.IP \(bu 3
+.B /etc/celmag ,
+and
+.IP \(bu 3
+.B $XDG_DATA_DIRS/mitosis/celmag
+for each XDG data directory.
+.PP
+Only existing directories are used. Top-level
+.B *.tcl
+files are evaluation layers; files under
+.B digest/
+are named digests.
+.SH TIMING DATA
+Timing collection is disabled by default. Enable it by setting
+.B MITOSIS_GRAPH=1
+in the environment:
+.PP
+.nf
+MITOSIS_GRAPH=1 mitosis
+.fi
+.PP
+It can also be enabled in
+.B build.mitosis.tcl
+with:
+.PP
+.nf
+set MITOSIS_GRAPH 1
+.fi
+.PP
+When enabled, Mitosis appends records to
+.BR .mitosis/timings.csv .
+The CSV contains job, source-file, phase-group, and whole-run records.
+Durations are in microseconds and timestamps are Unix milliseconds.
+Group records distinguish wall-clock elapsed time from summed job work;
+with parallel jobs, summed work may exceed the group's wall time.
+Whole-run elapsed time includes planning and execution. Source line counts
+refer to direct source files, not included headers. A digest labels its
+phases with
+.BR "phase TYPE NAME" ;
+unlabeled jobs use the
+.B generate
+phase.
+.PP
+The CSV is append-only, does not participate in cache validity, and is
+removed by
+.BR clean .
+Dry-run and question mode do not record timings. Consumers can read the CSV
+without depending on Mitosis' internal cache format.
+.SH EXIT STATUS
+.TP
+.B 0
+Build succeeded, or question mode found all requested targets up to date.
+.TP
+.B 1
+Question mode found that a build would be needed.
+.TP
+.B 2
+Build failure, command-line error, or other fatal error.
+.SH FILES
+.TP
+.B build.mitosis.tcl
+Project build description, searched upward from the current directory.
+.TP
+.B build.celmag
+Legacy project-file name, used only when
+.B build.mitosis.tcl
+is absent.
+.TP
+.B .mitosis/
+Per-project cache and optional
+.B timings.csv
+history.
+.TP
+.B MANDIR/man1/mitosis.1
+Installed section 1 manual. For a user install, the default
+.B MANDIR
+is
+.B $XDG_DATA_HOME/man
+(or
+.B ~/.local/share/man
+when
+.B XDG_DATA_HOME
+is unset).
+.TP
+.B $XDG_DATA_HOME/mitosis/celmag
+Default user evaluation data directory; see
+.BR --eval-path .
+.SH MANUAL INSTALLATION
+The installer places this page at
+.B MANDIR/man1/mitosis.1 .
+For an ordinary user install, the default is
+.B $XDG_DATA_HOME/man/man1/mitosis.1 ,
+with
+.B XDG_DATA_HOME
+falling back to
+.B ~/.local/share .
+No root privileges are required. Override the manual hierarchy with
+.B MANDIR
+when installing to a nonstandard prefix:
+.PP
+.nf
+MANDIR="$HOME/.local/share/man" ./install.sh
+.fi
+.PP
+For a normal user install, the executable is placed in
+.B ~/.local/bin .
+With
+.BR man-db ,
+when
+.B MANPATH
+is unset, its default search path is derived in part from
+.BR PATH :
+for each executable path entry it checks the corresponding
+.B ../share/man
+hierarchy. Thus, when
+.B ~/.local/bin
+is in
+.B PATH
+and
+.B XDG_DATA_HOME
+has its default value, the page in
+.B ~/.local/share/man/man1
+is found by
+.BR "man mitosis" .
+.PP
+If
+.B MANPATH
+is set, it overrides man-db's automatic search path. To add a custom
+manual hierarchy while retaining the normal system paths, use a trailing
+colon:
+.PP
+.nf
+MANPATH="${XDG_DATA_HOME:-$HOME/.local/share}/man${MANPATH:+:$MANPATH}:" man mitosis
+.fi
+.PP
+The trailing empty component asks man-db to append its default paths; the
+.B MANPATH
+expansion also preserves any paths already configured by the user. Other manual-page implementations may use different
+search-path rules; consult their
+.BR man (1)
+and
+.BR manpath (1)
+manuals. Check the active man-db path with
+.BR "manpath" .
+.PP
+In a source checkout,
+.B mitosis -h
+uses the
+.B mitosis.1
+file beside
+.BR mitosis.tcl .
+Installed copies use the regular
+.BR "man mitosis"
+lookup, so the page does not need to be installed beside the executable.
+.SH EXAMPLES
+Build the default target:
+.PP
+.nf
+mitosis
+.fi
+.PP
+Build with four concurrent jobs, forcing all outputs to be rebuilt:
+.PP
+.nf
+mitosis -j4 -B
+.fi
+.PP
+Print the plan without executing commands:
+.PP
+.nf
+mitosis --dry-run
+.fi
+.PP
+Record timing data for one build:
+.PP
+.nf
+MITOSIS_GRAPH=1 mitosis
+.fi
+.PP
+Display the manual:
+.PP
+.nf
+mitosis --help
+.fi
+.SH SEE ALSO
+.BR man (1),
+.BR make (1),
+.BR tclsh (1)
+.SH AUTHORS
+Mitosis project contributors.
