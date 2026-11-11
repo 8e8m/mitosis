@@ -1,12 +1,16 @@
-# Mitosis timing history.
-# Usage:
-#   gnuplot -e "CSV='.mitosis/timings.csv'; PNG='mitosis-timings.png'" \
-#       mitosis-timings.gnuplot
+# Mitosis timing history plotter. Originally by GPT.
 #
-# if you see:
-# Could not find/open font when opening font "arial", using internal non-scalable font
-# set in your .bashrc:
-# export export GDFONTPATH=/usr/share/fonts/corefonts
+# Note:
+#   Provide MITOSIS_GRAPH=1 environmentally or set MITOSIS_GRAPH 1 inbuild, for graphing data recording.
+#
+# Usage:
+#   gnuplot -e "CSV='.mitosis/timings.csv'; PNG='mitosis-timings.png'" /usr/share/mitosis/celmag/timings.gnuplot
+#   gnuplot -e "CSV='.mitosis/timings.csv'; PNG='mitosis-timings.png'" ~/.local/.share/mitosis/celmag/timings.gnuplot
+#
+# If you see:
+#   Could not find/open font when opening font "arial", using internal non-scalable font
+# Set in your .bashrc:
+#   export export GDFONTPATH=/usr/share/fonts/corefonts
 #
 # CSV columns:
 #   1 record, 2 run_id, 3 timestamp_ms, 4 job_id, 5 output, 6 phase,
