@@ -3,6 +3,11 @@
 #   gnuplot -e "CSV='.mitosis/timings.csv'; PNG='mitosis-timings.png'" \
 #       mitosis-timings.gnuplot
 #
+# if you see:
+# Could not find/open font when opening font "arial", using internal non-scalable font
+# set in your .bashrc:
+# export export GDFONTPATH=/usr/share/fonts/corefonts
+#
 # CSV columns:
 #   1 record, 2 run_id, 3 timestamp_ms, 4 job_id, 5 output, 6 phase,
 #   7 status, 8 elapsed_us, 9 work_us, 10 jobs, 11 source_file,
@@ -14,7 +19,17 @@ if (!exists("PNG")) PNG = "mitosis-timings.png"
 if (!exists("RUN_ID")) RUN_ID = ""
 
 set datafile separator comma
-set terminal pngcairo size 1800,1200 enhanced font "Sans,10"
+# Pick an available PNG terminal: pngcairo if built in, else libgd's png.
+if (strstrt(GPVAL_TERMINALS, "pngcairo") > 0) {
+    set terminal pngcairo size 1800,1200 enhanced font "Sans,10"
+} else {
+    if (strstrt(GPVAL_TERMINALS, " png ") > 0 || strstrt(GPVAL_TERMINALS, "\npng ") > 0) {
+        set terminal png size 1800,1200 enhanced
+    } else {
+        print "mitosis-timings: this gnuplot has neither pngcairo nor png; install a gnuplot built with cairo or gd"
+        exit status 1
+    }
+}
 set output PNG
 set multiplot layout 2,2 rowsfirst title "Mitosis build timing history"
 set grid ytics
@@ -48,6 +63,7 @@ plot CSV using (strcol(1) eq "group" && (RUN_ID eq "" || strcol(2) eq RUN_ID) ? 
 unset xtics
 unset style histogram
 unset style data
+set xtics autofreq norotate
 
 # Direct translation-unit LOC against its compile duration.
 set title "Compile time vs direct source lines"
